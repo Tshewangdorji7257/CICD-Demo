@@ -12,7 +12,6 @@ jobs:
   sonarcloud:
     name: SonarCloud SAST Scan
     runs-on: ubuntu-latest
-    if: ${{ secrets.SONAR_TOKEN != '' }}
 
     steps:
       - name: Checkout code
@@ -45,4 +44,5 @@ jobs:
           mvn sonar:sonar \
             -Dsonar.projectKey=${{ secrets.SONAR_ORGANIZATION }}_CICD-Demo \
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
-            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.qualitygate.wait=true
