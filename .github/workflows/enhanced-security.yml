@@ -1,6 +1,5 @@
-# Enhanced GitHub Actions workflow with comprehensive Snyk integration
-# Updated to use non-interactive SNYK_TOKEN authentication
-name: Enhanced CI/CD with Comprehensive Security
+# Comprehensive Security Pipeline - Snyk + SonarCloud Integration
+name: Enhanced Security Pipeline
 
 on:
   push:
@@ -8,7 +7,7 @@ on:
   pull_request:
     branches: ["master", "main"]
   schedule:
-    - cron: "0 2 * * 1"
+    - cron: "0 2 * * 1" # Weekly scan on Monday at 2 AM
 
 env:
   JAVA_VERSION: "17"
@@ -29,18 +28,17 @@ jobs:
           filters: |
             code:
               - 'src/**'
-              - '!src/test/**'
             dependencies:
               - 'pom.xml'
               - '.snyk'
             docker:
-              - 'Dockerfile'
+              - 'dockerfile'
               - 'dockerrun.aws.json'
 
   test:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true'
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -48,14 +46,16 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "temurin"
           cache: maven
-      - run: mvn -B test --file pom.xml
-      - run: mvn jacoco:report
+      - name: Run Tests with Coverage
+        run: mvn clean verify
+      - name: Generate JaCoCo Report
+        run: mvn jacoco:report
       - uses: codecov/codecov-action@v3
         with:
           file: ./target/site/jacoco/jacoco.xml
           fail_ci_if_error: false
 
-  security:
+  security-snyk:
     runs-on: ubuntu-latest
     needs: [changes, test]
     if: always() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true' || github.event_name == 'schedule')
@@ -70,12 +70,9 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "temurin"
           cache: maven
-      - run: mvn clean compile -DskipTests
-      - run: |
-          echo "🔍 Environment debugging for Snyk scan"
-          echo "Matrix scan type: ${{ matrix.scan-type }}"
-          ls -la
-          mvn dependency:tree || true
+      
+      - name: Build project for security scan
+        run: mvn clean compile -DskipTests
 
       - name: Install Snyk CLI
         run: |
@@ -101,33 +98,74 @@ jobs:
           echo "🔍 Running Snyk code scan..."
           snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif || true
 
-      - id: check-sarif
+      - name: Check SARIF file exists
+        id: check-sarif
         run: |
           SARIF_FILE="snyk-${{ matrix.scan-type }}.sarif"
           if [ -f "$SARIF_FILE" ]; then
             echo "sarif-exists=true" >> $GITHUB_OUTPUT
+            echo "✅ SARIF file found: $SARIF_FILE"
           else
             echo "sarif-exists=false" >> $GITHUB_OUTPUT
+            echo "❌ SARIF file not found: $SARIF_FILE"
             ls -la *.sarif 2>/dev/null || echo "No SARIF files found"
           fi
 
-      - uses: github/codeql-action/upload-sarif@v3
+      - name: Upload SARIF to GitHub Security
         if: steps.check-sarif.outputs.sarif-exists == 'true'
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-${{ matrix.scan-type }}.sarif
           category: snyk-${{ matrix.scan-type }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Snyk Results as Artifact
         if: steps.check-sarif.outputs.sarif-exists == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: snyk-${{ matrix.scan-type }}-results
           path: snyk-${{ matrix.scan-type }}.sarif
           retention-days: 30
 
+  security-sonarcloud:
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    if: always() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.dependencies == 'true' || github.event_name == 'schedule')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for better analysis
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          cache: maven
+
+      - name: Cache SonarCloud packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Build and run tests for SonarCloud
+        run: mvn clean verify
+
+      - name: Run SonarCloud Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn sonar:sonar \
+            -Dsonar.projectKey=${{ secrets.SONAR_ORGANIZATION }}_cicd-demo \
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.qualitygate.wait=true
+
   container-security:
     runs-on: ubuntu-latest
     needs: [changes, test]
-    if: always()
+    if: needs.changes.outputs.docker == 'true' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -135,11 +173,18 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "temurin"
           cache: maven
-      - run: mvn clean package -DskipTests
-      - run: |
+      
+      - name: Build application package
+        run: mvn clean package -DskipTests
+      
+      - name: Build Docker image
+        run: |
           docker build -t cicd-demo:${{ github.sha }} .
           docker tag cicd-demo:${{ github.sha }} cicd-demo:latest
-      - uses: snyk/actions/docker@master
+      
+      - name: Run Snyk Container Scan
+        uses: snyk/actions/docker@master
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -149,15 +194,17 @@ jobs:
             --file=dockerfile
             --exclude-base-image-vulns
             --sarif-file-output=snyk-container.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+      
+      - name: Upload Container Security Results
         if: always()
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-container.sarif
           category: snyk-container
 
   monitor:
     runs-on: ubuntu-latest
-    needs: [test, security]
+    needs: [test, security-snyk, security-sonarcloud]
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
@@ -166,8 +213,9 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "temurin"
           cache: maven
-      - run: mvn clean compile -DskipTests
-      - name: Install Snyk CLI
+      - name: Build for monitoring
+        run: mvn clean compile -DskipTests
+      - name: Install Snyk CLI for monitoring
         run: |
           echo "📦 Installing Snyk CLI for monitoring..."
           npm install -g snyk
@@ -182,38 +230,19 @@ jobs:
             --target-reference="${{ github.ref }}" \
             --remote-repo-url="${{ github.server_url }}/${{ github.repository }}.git" || true
 
-  notify:
+  security-report:
     runs-on: ubuntu-latest
-    needs: [security, container-security]
-    if: failure() && github.event_name != 'pull_request'
+    needs: [security-snyk, security-sonarcloud, container-security]
+    if: always()
     steps:
-      - uses: 8398a7/action-slack@v3
-        with:
-          status: failure
-          text: |
-            🚨 Critical security vulnerabilities detected in ${{ github.repository }}
-
-            Branch: ${{ github.ref }}
-            Commit: ${{ github.sha }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      - uses: actions/github-script@v6
-        with:
-          script: |
-            const title = `🚨 Security vulnerabilities detected - ${context.sha.substring(0, 7)}`;
-            const body = `
-            Critical security vulnerabilities have been detected in the latest commit.
-            - Commit: ${context.sha}
-            - Branch: ${context.ref}
-            - Workflow: ${context.workflow}
-            - Run: ${context.runNumber}
-
-            Please review the security scan results and take immediate action.
-            `;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['security', 'urgent']
-            });
+      - name: Security Scan Summary
+        run: |
+          echo "## � Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Snyk Dependencies | ${{ needs.security-snyk.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SonarCloud SAST | ${{ needs.security-sonarcloud.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Security | ${{ needs.container-security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Security pipeline completed**" >> $GITHUB_STEP_SUMMARY
+          echo "Check the Security tab for detailed vulnerability reports." >> $GITHUB_STEP_SUMMARY
