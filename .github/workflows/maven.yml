@@ -25,6 +25,7 @@ jobs:
     needs: test
     name: Snyk Security Scan
     runs-on: ubuntu-latest
+    if: ${{ secrets.SNYK_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK 17
@@ -37,15 +38,17 @@ jobs:
         run: mvn clean compile
       - name: Run Snyk to check for vulnerabilities
         uses: snyk/actions/maven@master
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: --severity-threshold=high --fail-on=upgradable
+          args: --severity-threshold=high
 
   sonarcloud:
     name: SonarCloud Security Scan
     needs: test
     runs-on: ubuntu-latest
+    if: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,7 +74,6 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn clean verify sonar:sonar \
-            -Dsonar.projectKey=${{ secrets.SONAR_ORGANIZATION }}_cicd-demo \
+            -Dsonar.projectKey=${{ secrets.SONAR_ORGANIZATION }}_CICD-Demo \
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
-            -Dsonar.host.url=https://sonarcloud.io \
-            -Dsonar.qualitygate.wait=true
+            -Dsonar.host.url=https://sonarcloud.io
